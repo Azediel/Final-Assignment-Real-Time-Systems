@@ -1,0 +1,102 @@
+import argparse, math, random, statistics, time
+from dataclasses import dataclass
+
+@dataclass
+class Task:
+    name: str
+    C: int
+    T: int
+
+@dataclass
+class Job:
+    name: str
+    C: int
+    release: int
+    deadline: int
+
+def measure_tau1(n=10000, digits=250):
+    pairs = [(random.randint(10**(digits-1), 10**digits-1),
+              random.randint(10**(digits-1), 10**digits-1)) for _ in range(n)]
+    times = []
+    for a, b in pairs:
+        t0 = time.perf_counter_ns()
+        _ = a * b
+        times.append((time.perf_counter_ns() - t0) / 1e6)  # ms
+    q1, q2, q3 = statistics.quantiles(times, n=4, method="inclusive")
+    return {"min": min(times), "max": max(times), "q1": q1, "q2": q2,
+            "q3": q3, "wcet": max(times)}
+
+def lcm(values):
+    h = 1
+    for v in values:
+        h = math.lcm(h, v)
+    return h
+
+def build_jobs(tasks):
+    H = lcm([t.T for t in tasks])
+    jobs = []
+    for task in tasks:
+        for k in range(H // task.T):
+            r = k * task.T
+            jobs.append(Job(f"{task.name}_{k+1}", task.C, r, r + task.T))
+    return H, jobs
+
+def schedule(tasks, allowed_miss="tau5"):
+    H, jobs = build_jobs(tasks)
+    t, done, rows = 0, [], []
+
+    while len(done) < len(jobs):
+        ready = [j for j in jobs if j not in done and j.release <= t]
+        if not ready:
+            t = min(j.release for j in jobs if j not in done)
+            continue
+
+        # EDF-like greedy: nearest deadline first; tau5 may miss its deadline.
+        feasible = [j for j in ready if j.name.startswith(allowed_miss) or t + j.C <= j.deadline]
+        if not feasible:
+            raise RuntimeError(f"No feasible job at t={t}")
+
+        j = min(feasible, key=lambda x: (x.deadline, x.C, x.release, x.name))
+        start, finish = t, t + j.C
+        rows.append({
+            "job": j.name, "C": j.C, "release": j.release, "deadline": j.deadline,
+            "start": start, "finish": finish,
+            "waiting": start - j.release,
+            "response_time": finish - j.release,
+            "deadline_missed": finish > j.deadline,
+        })
+        done.append(j)
+        t = finish
+    return H, rows
+
+def idle_time(rows):
+    idle, t = 0, 0
+    for r in sorted(rows, key=lambda x: x["start"]):
+        idle += max(0, r["start"] - t)
+        t = max(t, r["finish"])
+    return idle
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--manual-c1", type=int, default=1)
+    p.add_argument("--samples", type=int, default=10000)
+    p.add_argument("--digits", type=int, default=250)
+    args = p.parse_args()
+
+    stats = measure_tau1(args.samples, args.digits)
+    tasks = [Task("tau1", args.manual_c1, 10), Task("tau2", 3, 10),
+             Task("tau3", 2, 20), Task("tau4", 2, 20), Task("tau5", 2, 40),
+             Task("tau6", 2, 40), Task("tau7", 3, 80)]
+
+    H, rows = schedule(tasks)
+    U = sum(t.C / t.T for t in tasks)
+    
+    print("tau1 timing statistics in s")
+    for key in ["min", "max", "q1", "q2", "q3", "wcet"]:
+        print(f"{key}: {stats[key]:.6f}")
+    print(f"C1 used = 1, hyperperiod = {H}, utilization = {U:.4f}")
+    print("total waiting =", sum(r["waiting"] for r in rows))
+    print("total idle =", idle_time(rows))
+    print("deadline misses =", [r["job"] for r in rows if r["deadline_missed"]])
+
+main()
